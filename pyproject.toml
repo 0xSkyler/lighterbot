@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lighter-btc-scalper"
+version = "1.0.0"
+description = "Live-only, event-driven BTC perpetual scalper for Lighter mainnet"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "lighter-sdk==1.1.6",
+    "aiohttp>=3.9",
+    "websockets>=13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+lighter-scalper = "scalper.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
+# ASYNC110: bounded polling loops during startup/shutdown are intentional.
+ignore = ["RUF012", "ASYNC110"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/scalper"]
+strict = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["lighter", "lighter.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

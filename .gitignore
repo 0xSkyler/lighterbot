@@ -1,0 +1,31 @@
+# Secrets: never commit real environment files or keys
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+api_key_config.json
+
+# Runtime state
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage

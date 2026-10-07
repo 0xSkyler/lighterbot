@@ -1,0 +1,67 @@
+[Unit]
+Description=Lighter BTC perpetual scalper (LIVE mainnet)
+Documentation=https://github.com/0xSkyler/lighterbot
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+# Never give up on transient failures; the growing restart delay below prevents hammering.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=scalper
+Group=scalper
+WorkingDirectory=/var/lib/lighter-scalper
+EnvironmentFile=/etc/lighter-scalper/lighter-scalper.env
+Environment=PYTHONUNBUFFERED=1
+Environment=DATA_DIR=/var/lib/lighter-scalper
+Environment=LOG_DIR=/var/log/lighter-scalper
+ExecStart=/opt/lighter-scalper/.venv/bin/lighter-scalper run
+
+# Restart after crashes, reboots and deploys. Every start reconciles with the exchange
+# before trading. The delay grows from 10 s to 2 min while failures repeat.
+Restart=always
+RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=120
+# Exit code 78 = fatal configuration/credential error: stay down until an operator fixes it.
+RestartPreventExitStatus=78
+
+# READY=1 is sent only after startup reconciliation; WATCHDOG=1 once a second afterwards.
+TimeoutStartSec=180
+WatchdogSec=30
+# SIGTERM triggers the graceful shutdown (resolve in-flight orders, flatten if configured).
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=150
+
+# Resource limits
+MemoryMax=512M
+TasksMax=256
+LimitNOFILE=4096
+CPUWeight=200
+
+# Privilege restrictions
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lighter-scalper /var/log/lighter-scalper
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
