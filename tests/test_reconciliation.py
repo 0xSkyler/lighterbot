@@ -552,3 +552,75 @@ async def test_operator_flatten_works_even_when_trading_is_halted() -> None:
     assert close.reduce_only and close.size == 300
     assert system.trader.sm.state is State.HALTED  # still halted: flattening does not resume trading
     assert "MANUAL_FLATTEN" in system.journal.event_kinds()
+
+
+# ------------------------------------------------- resting (maker) entries
+
+
+async def maker_system() -> System:
+    system = await started(make_config(ENTRY_MODE="maker", MAKER_REST_MS=100))
+    system.client.stream = system.trader.on_order_update
+    return system
+
+
+async def rest_entry(system: System) -> int:
+    system.signals.signal = LONG_SIGNAL
+    system.trader.on_market(time.monotonic_ns())
+    await settle()
+    order = system.trader.entry_order
+    assert order is not None and order.post_only and system.trader.sm.state is State.ENTRY_PENDING
+    assert system.client.position.open_orders == 1 and system.client.position.signed_size == 0
+    return order.client_order_index
+
+
+async def test_resting_entry_is_cancelled_on_the_exchange_after_the_rest_time() -> None:
+    system = await maker_system()
+    coi = await rest_entry(system)
+    system.signals.signal = NO_SIGNAL
+    await asyncio.sleep(0.25)
+    await settle()
+    assert system.order_kinds()[-2:] == ["order", "cancel"]
+    assert system.client.signed[-1]["order_ref"] == coi
+    assert system.client.active_orders == [] and system.client.position.signed_size == 0
+    assert system.trader.sm.state is State.FLAT and system.journal.trades == []
+
+
+async def test_resting_entry_filled_by_a_counterparty_is_exited_reduce_only() -> None:
+    system = await maker_system()
+    coi = await rest_entry(system)
+    system.signals.signal = NO_SIGNAL
+    fill = system.client.fill_resting(coi)
+    assert system.trader.sm.state is State.OPEN_LONG
+    system.trader.on_position(system.client.position)
+    system.client.bbo = (px(83699.0), px(83700.0))
+    system.market.set([(px(83699.0), sz(0.05))], [(px(83700.0), sz(0.05))])
+    system.trader.on_market(time.monotonic_ns())  # GREEN
+    await settle()
+    assert system.trader.sm.state is State.FLAT and system.client.position.signed_size == 0
+    assert "cancel" not in system.order_kinds()[-2:]
+    trade = system.journal.trades[0]
+    assert trade["exit_reason"] == "PROFIT" and trade["realized_pnl_usd"] > 0
+    assert trade["avg_entry"] == pytest.approx(fill.filled_quote_q / fill.filled / 10)
+
+
+async def test_recovery_with_a_resting_entry_cancels_it_and_returns_flat() -> None:
+    system = await maker_system()
+    await rest_entry(system)
+    system.signals.signal = NO_SIGNAL
+    system.reconciler.start_recovery("ACCOUNT_STREAM_DOWN")
+    await system.reconciler.wait_idle()
+    assert system.client.active_orders == [] and system.client.position.signed_size == 0
+    assert system.trader.sm.state is State.FLAT and system.trader.entry_order is None
+    assert system.journal.trades == []  # nothing filled, nothing invented
+
+
+async def test_resting_order_left_by_a_previous_run_is_cancelled_at_startup() -> None:
+    system = make_system(make_config(ENTRY_MODE="maker"))
+    stale = bot_order(system.ids)
+    system.client.active_orders = [stale]
+    system.client.position = flat_position(open_orders=1)
+    await system.reconciler.startup()
+    assert system.client.active_orders == []
+    assert (
+        system.client.signed[0]["kind"] == "cancel" and system.client.signed[0]["order_ref"] == stale.client_order_index
+    )

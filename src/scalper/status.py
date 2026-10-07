@@ -9,12 +9,37 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .orderbook import spread_mbps
+from .persistence import utc_iso
 from .pnl import LONG, estimate_close
 
 if TYPE_CHECKING:
     from .strategy import Trader
 
 NS_PER_MS = 1_000_000
+
+
+def recovery_snapshot(trader: Trader, last_event: str = "") -> dict[str, Any]:
+    """Small recovery snapshot persisted on every transition and heartbeat."""
+    pos = trader.position
+    return {
+        "state": trader.sm.state.value,
+        "heartbeat": utc_iso(),
+        "last_event": last_event,
+        "last_client_order_index": trader.ids.last,
+        "trade_id": trader.ctx.trade_id if trader.ctx is not None else None,
+        "entry_order": trader.entry_order.client_order_index if trader.entry_order else None,
+        "exit_order": trader.exit_order.client_order_index if trader.exit_order else None,
+        "position": None
+        if pos is None
+        else {
+            "side": pos.side,
+            "size": pos.size,
+            "cost_q": pos.cost_q,
+            "entry_size": pos.entry_size,
+            "exit_size": pos.exit_size,
+            "adopted": pos.adopted,
+        },
+    }
 
 
 def trader_view(trader: Trader, now_ns: int) -> dict[str, Any]:

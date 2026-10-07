@@ -99,15 +99,40 @@ no self-tuning.
 An entry is sent only if **all** of these hold, otherwise it is skipped (never forced):
 
 - state is `FLAT` and no entry block is active (streams healthy, data fresh, startup synced, leverage confirmed);
-- the exchange itself reports no BTC position and no resting BTC order;
+- the exchange itself reports no BTC position (and, in taker mode, no resting BTC order; in maker mode
+  foreign or stale orders are detected on the order stream and by reconciliation);
 - spread <= `MAX_SPREAD_BPS`, 1 s price range <= `MAX_VOLATILITY_BPS`;
-- the full size fits in the book within `MAX_ENTRY_SLIPPAGE_BPS` (depth-walked VWAP);
+- taker mode only: the full size fits in the book within `MAX_ENTRY_SLIPPAGE_BPS` (depth-walked VWAP);
 - size is above Lighter's minimum, balance covers the margin;
-- rate-limit headroom covers the entry, its exit **and** a reserve; `MAX_ENTRIES_PER_MINUTE` not exceeded.
+- rate-limit headroom covers the entry, its exit (plus a cancel in maker mode) **and** a reserve;
+  `MAX_ENTRIES_PER_MINUTE` not exceeded.
 
-The entry is a `LIMIT + IOC` order priced at best ask/bid plus the slippage cap, so it can never
-fill beyond the cap. `FLAT -> ENTRY_PENDING` happens before the order is created; further signals
-are ignored until that order resolves. An entry is never re-sent.
+`FLAT -> ENTRY_PENDING` happens before the order is created; further signals are ignored until that
+order resolves. An entry is never re-sent. `ENTRY_MODE` selects how the order is placed:
+
+**`maker` (default): a resting post-only order.** A long rests at the best bid, a short at the best
+ask, stepped `MAKER_IMPROVE_TICKS` in front of the queue when the spread has room and always at least
+one tick away from the other side. It never pays the spread, and Lighter applies no latency to maker
+orders (taker orders on Standard accounts are delayed about 300 ms, which is why a momentum signal
+taken with IOC tends to arrive after the move). The price of that is fill uncertainty: the order only
+fills if someone trades against it, so many signals produce no trade at all.
+
+While the order rests (`ENTRY_PENDING`) every market event checks it. It is cancelled when it has not
+filled after `MAKER_REST_MS`, when the market has moved away by more than `MAKER_MAX_DRIFT_BPS`, when
+the signal reverses, when entries become blocked (pause, stale data, shutdown) or when part of it
+fills. A cancel is not a return to `FLAT`: the order can still fill until the exchange confirms it is
+gone, so the state only moves on a terminal order update (cancelled -> `FLAT`, filled -> `OPEN_*`).
+If no confirmation arrives within `ORDER_RESOLVE_TIMEOUT_MS`, recovery reads the exchange and
+flattens. After a partial fill the remainder is cancelled first and no reduce-only exit is sent
+until that cancel is confirmed, so an exit can never race a still-live entry. If the exchange
+rejects the order because it would cross (`canceled-post-only`), nothing happened and the bot is flat.
+The order carries a 10 minute expiry, so an order orphaned by a crash cannot rest for long; the next
+start cancels it anyway.
+
+**`taker`: `LIMIT + IOC`** priced at best ask/bid plus the slippage cap, so it can never fill beyond
+the cap. Certain fill, but it pays the spread and is subject to the taker delay.
+
+Exits are the same in both modes: reduce-only, taking liquidity, sent the moment GREEN is detected.
 
 ## How GREEN is calculated
 
@@ -184,11 +209,11 @@ Checked against the official docs (apidocs.lighter.xyz), SDK `lighter-sdk` 1.1.6
 | --- | --- |
 | Endpoints | REST `https://mainnet.zklighter.elliot.ai`, WS `wss://mainnet.zklighter.elliot.ai/stream`, chain id 304 |
 | BTC market | Found by symbol at startup (currently market id 1): price decimals 1, size decimals 5, min 0.00007 BTC and 10 USD, min initial margin 2% (max 50x), default 20x |
-| **Taker latency** | Lighter delays taker orders in the sequencer: **300 ms on Standard and Plus, 140 ms on Premium**. Every IOC entry and exit of this bot is a taker order. A fill therefore happens at the book as it is ~0.14-0.3 s after the decision; a detected green is an estimate, not a guaranteed fill price |
+| **Taker latency** | Lighter delays taker orders in the sequencer: **300 ms on Standard and Plus, 140 ms on Premium**. Every exit of this bot, and every entry in `ENTRY_MODE=taker`, is a taker order; maker (post-only) entries are not delayed, but cancels are (300 ms on Standard). A taker fill therefore happens at the book as it is ~0.14-0.3 s after the decision; a detected green is an estimate, not a guaranteed fill price |
 | Fees | Standard 0 / 0, Plus 0.5 bps, Premium by staked LIT. Read from `accountLimits`; fee ticks are 1e-6 of notional |
 | Rate limits | Standard: **60 requests per rolling minute including order transactions** (about 20 round trips per minute at most). Plus/Premium: 24,000 weighted requests and >= 4,000 `sendTx` per minute plus a volume quota |
 | Order book stream | Full snapshot, then deltas about every 50 ms with `begin_nonce`/`nonce` continuity; `ticker` (BBO) updates faster |
-| Orders | `LIMIT + IOC` and `MARKET + IOC` with `order_expiry = 0`; price is the worst acceptable price; `reduce_only` supported |
+| Orders | `LIMIT + IOC` and `MARKET + IOC` with `order_expiry = 0`; maker entries are `LIMIT + POST_ONLY` with a 10 minute expiry (Lighter's minimum is 5 minutes); price is the worst acceptable price; `reduce_only` supported |
 | Nonces | Per API key, strictly sequential; an API-level rejection does not consume the nonce |
 | API keys | Indexes 4-254 for your own keys (0-3 are Lighter's apps). The API key cannot withdraw to other addresses |
 | Auth tokens | Max 8 h; the bot uses 7 h tokens and renews while flat |
@@ -327,7 +352,7 @@ Required to start:
 | `POSITION_MODE` | `fixed_margin` (notional = `MARGIN_PER_TRADE_USD` x `LEVERAGE`) or `fixed_notional` |
 | `MARGIN_PER_TRADE_USD` / `NOTIONAL_PER_TRADE_USD` | Position size. The account balance is never used automatically |
 | `MIN_PROFIT_USD`, `MIN_PROFIT_BPS` | Minimum net profit for GREEN (larger of the two; at least one > 0) |
-| `MAX_ENTRY_SLIPPAGE_BPS` | Entry price cap beyond best ask/bid |
+| `MAX_ENTRY_SLIPPAGE_BPS` | Entry price cap beyond best ask/bid (taker mode) |
 | `MAX_NORMAL_EXIT_SLIPPAGE_BPS`, `MAX_EMERGENCY_EXIT_SLIPPAGE_BPS` | Exit price bands |
 | `MAX_ADVERSE_MOVE_BPS`, `MAX_LOSS_USD` | Hard protection (at least one > 0) |
 | `MAX_HOLD_MS` | Maximum holding time before flattening |
@@ -336,6 +361,7 @@ Required to start:
 | `ENTRY_SCORE_THRESHOLD` | Score needed to enter (0-1) |
 
 Optional (defaults in `.env.example`): `MARKET=BTC`, `MARGIN_MODE=cross|isolated`,
+`ENTRY_MODE=maker|taker`, `MAKER_REST_MS`, `MAKER_IMPROVE_TICKS`, `MAKER_MAX_DRIFT_BPS`,
 `SAFETY_BUFFER_BPS`, `PROFIT_EXIT_MODE`, `EXIT_ON_SIGNAL_REVERSAL`, the seven `*_WEIGHT` values,
 `BOOK_DEPTH_LEVELS`, `MOMENTUM_SCALE_BPS`, `MAX_VOLATILITY_BPS`, `MAX_ENTRIES_PER_MINUTE`,
 `EXISTING_POSITION_ACTION`, `SHUTDOWN_POSITION_ACTION`, `CANCEL_FOREIGN_ORDERS`, `TAKER_FEE_BPS`,
@@ -460,7 +486,7 @@ exercised without a funded account, so treat the first session as commissioning:
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt && pip install -e ".[dev]"
-pytest                 # 360 deterministic tests, no network, no orders
+pytest                 # 389 deterministic tests, no network, no orders
 ruff check src tests && mypy
 ```
 

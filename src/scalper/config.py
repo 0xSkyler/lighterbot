@@ -67,6 +67,10 @@ class Config:
     account_stream_grace_ms: int = 1500
 
     # --- entries
+    entry_mode: str = "maker"  # maker: resting post-only order | taker: LIMIT+IOC across the spread
+    maker_rest_ms: int = 1500
+    maker_improve_ticks: int = 1
+    maker_max_drift_mbps: int = 500
     max_entry_slippage_mbps: int = 0
     max_spread_mbps: int = 0
     max_volatility_mbps: int = 15_000
@@ -323,6 +327,12 @@ def load_config(env: Mapping[str, str] | None = None, env_file: Path | None = No
         market_data_stale_ms=r.integer("MARKET_DATA_STALE_MS", lo=100, hi=30_000),
         order_resolve_timeout_ms=r.integer("ORDER_RESOLVE_TIMEOUT_MS", 3000, lo=500, hi=60_000),
         account_stream_grace_ms=r.integer("ACCOUNT_STREAM_GRACE_MS", 1500, lo=0, hi=60_000),
+        entry_mode=r.text("ENTRY_MODE", "maker", ("maker", "taker")),
+        maker_rest_ms=r.integer("MAKER_REST_MS", 1500, lo=100, hi=60_000),
+        maker_improve_ticks=r.integer("MAKER_IMPROVE_TICKS", 1, lo=0, hi=100),
+        maker_max_drift_mbps=bps_to_mbps(
+            r.decimal("MAKER_MAX_DRIFT_BPS", Decimal("0.5"), lo=Decimal(0), hi=Decimal(100))
+        ),
         max_entry_slippage_mbps=bps_to_mbps(entry_slip),
         max_spread_mbps=bps_to_mbps(r.decimal("MAX_SPREAD_BPS", lo=Decimal("0.001"), hi=Decimal(1000))),
         max_volatility_mbps=bps_to_mbps(r.decimal("MAX_VOLATILITY_BPS", Decimal(15), lo=Decimal("0.001"))),

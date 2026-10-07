@@ -154,11 +154,49 @@ GROUPS: tuple[Group, ...] = (
         ),
     ),
     Group(
+        "entry_order",
+        "Entry order",
+        "How a position is opened once the signal fires. Exits always take liquidity (reduce-only).",
+        (
+            Field(
+                "ENTRY_MODE",
+                "Entry mode",
+                "choice",
+                "maker: rest a post-only order on our own side; it never pays the spread and is not delayed "
+                "by Lighter, but only fills if someone trades against it. "
+                "taker: cross the spread with LIMIT+IOC; certain fill, but it pays the spread and lands late.",
+                choices=("maker", "taker"),
+            ),
+            Field(
+                "MAKER_REST_MS",
+                "Maker: cancel an unfilled entry after",
+                "int",
+                unit="ms",
+                placeholder="1500",
+            ),
+            Field(
+                "MAKER_IMPROVE_TICKS",
+                "Maker: ticks in front of the best price",
+                "int",
+                "0 joins the queue at the best bid/ask. The order never crosses the spread.",
+                placeholder="1",
+            ),
+            Field(
+                "MAKER_MAX_DRIFT_BPS",
+                "Maker: cancel if the market moves away by",
+                "number",
+                "0 switches this check off.",
+                unit="bps",
+                placeholder="0.5",
+            ),
+        ),
+    ),
+    Group(
         "slippage",
         "Slippage limits",
         "How far past the best price an order may reach.",
         (
-            Field("MAX_ENTRY_SLIPPAGE_BPS", "Entry", "number", unit="bps", placeholder="1"),
+            Field("MAX_ENTRY_SLIPPAGE_BPS", "Entry (taker mode only)", "number", unit="bps", placeholder="1"),
             Field("MAX_NORMAL_EXIT_SLIPPAGE_BPS", "Normal exit", "number", unit="bps", placeholder="2"),
             Field("MAX_EMERGENCY_EXIT_SLIPPAGE_BPS", "Emergency exit", "number", unit="bps", placeholder="30"),
         ),

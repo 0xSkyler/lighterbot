@@ -116,6 +116,7 @@ class Metrics:
     trade_times: deque[float] = field(default_factory=lambda: deque(maxlen=2048))
     entries_sent: int = 0
     entries_missed: int = 0
+    entries_cancelled: int = 0
     partial_fills: int = 0
     order_rejections: int = 0
     reconnects_market: int = 0
@@ -215,6 +216,7 @@ class Metrics:
             "trades_per_minute": self.trades_per_minute(),
             "entries_sent": self.entries_sent,
             "entries_missed": self.entries_missed,
+            "entries_cancelled": self.entries_cancelled,
             "partial_fills": self.partial_fills,
             "order_rejections": self.order_rejections,
             "reconnects_market": self.reconnects_market,

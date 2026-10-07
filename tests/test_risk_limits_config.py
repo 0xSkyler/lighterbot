@@ -27,7 +27,7 @@ def plan(side: int = LONG, **kw: object) -> tuple[object, str]:
         "meta": BTC,
         "available_balance_q": BALANCE,
         "volatility_mbps": 0,
-        "taker_fee_tick": 0,
+        "fee_tick": 0,
     }
     bids = kw.pop("bids", BIDS)
     asks = kw.pop("asks", ASKS)

@@ -4,6 +4,7 @@ Event flow (everything below runs synchronously on the event loop, so each
 state check + transition is atomic):
 
     market event  -> on_market()      FLAT: evaluate entry      OPEN: evaluate exit
+                                      ENTRY_PENDING: watch a resting (maker) entry
     account event -> on_order_update() / on_trade_fill() / on_position()
 
 Priorities while exposure exists: hard-loss protection, then GREEN -> exit,
@@ -27,7 +28,7 @@ from .execution import Executor
 from .lighter_client import SendResult
 from .metrics import Metrics
 from .orderbook import OrderBook
-from .persistence import Journal, utc_iso
+from .persistence import Journal
 from .pnl import LONG, SHORT, CloseEstimate, breakeven_exit_price, estimate_close
 from .position import (
     ActiveOrder,
@@ -41,11 +42,12 @@ from .position import (
     is_bot_order,
     is_terminal_status,
 )
-from .precision import MarketMeta, fee_q, price_minus_mbps, price_plus_mbps
+from .precision import MBPS_DENOM, MarketMeta, fee_q, price_minus_mbps, price_plus_mbps
 from .rate_limits import RateLimiter
-from .risk import EntryPlan, Limits, hard_loss_reason, hold_expired, plan_entry
+from .risk import EntryPlan, Limits, hard_loss_reason, hold_expired, plan_entry, plan_maker_entry
 from .signals import NO_SIGNAL, Signal, SignalEngine
 from .state_machine import EXPOSED_STATES, State, StateMachine
+from .status import recovery_snapshot
 from .trade_record import close_trade
 
 log = logging.getLogger("scalper.strategy")
@@ -97,6 +99,7 @@ class Trader:
         journal: Journal,
         ids: ClientOrderIds,
         fee_tick: int,
+        maker_fee_tick: int | None = None,
         clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self.cfg = cfg
@@ -111,6 +114,8 @@ class Trader:
         self.journal = journal
         self.ids = ids
         self.fee_tick = fee_tick
+        self.maker_fee_tick = fee_tick if maker_fee_tick is None else maker_fee_tick
+        self._maker = cfg.entry_mode == "maker"
         self._clock = clock
         self.sm = StateMachine(self._on_transition)
         self.recovery: RecoveryHooks | None = None
@@ -167,6 +172,8 @@ class Trader:
             self._evaluate_exit(now_ns)  # exits always come before any entry logic
         elif state is State.FLAT:
             self._evaluate_entry(now_ns)
+        elif state is State.ENTRY_PENDING:
+            self._watch_resting_entry(now_ns)
 
     # =================================================================== entries
 
@@ -174,8 +181,13 @@ class Trader:
         if self.blocks:
             return
         exchange = self.exch_pos
-        if exchange is None or exchange.signed_size or exchange.open_orders or exchange.pending_orders:
-            return  # the exchange has not confirmed "flat, no resting orders"
+        if exchange is None or exchange.signed_size:
+            return  # the exchange has not confirmed "flat"
+        # With resting entries the position feed's order counters lag our own order's life cycle;
+        # foreign and stale orders are caught by the order stream and by reconciliation instead.
+        maker = self._maker
+        if not maker and (exchange.open_orders or exchange.pending_orders):
+            return
         market = self.market
         bids = market.top_bids
         asks = market.top_asks
@@ -187,10 +199,10 @@ class Trader:
         self.last_signal = signal
         if signal.side == 0:
             return
-        if not self.limiter.can_enter():
+        if not self.limiter.can_enter(3 if maker else 2):  # maker: entry, cancel, exit
             self.metrics.count_skip("RATE_LIMIT_RESERVE")
             return
-        plan, reason = plan_entry(
+        plan, reason = (plan_maker_entry if maker else plan_entry)(
             signal.side,
             bids,
             asks,
@@ -198,7 +210,7 @@ class Trader:
             meta=self.meta,
             available_balance_q=self.available_q,
             volatility_mbps=self.signals.range_mbps(now_ns),
-            taker_fee_tick=self.fee_tick,
+            fee_tick=self.maker_fee_tick if maker else self.fee_tick,
         )
         if plan is None:
             self.metrics.count_skip(reason)
@@ -216,9 +228,10 @@ class Trader:
             size=plan.size,
             limit_price=plan.limit_price,
             reduce_only=False,
-            market_order=False,  # LIMIT + IOC: never fills beyond the slippage cap
+            market_order=False,  # taker mode: LIMIT + IOC, never fills beyond the slippage cap
             reason="SIGNAL",
             created_ns=now_ns,
+            post_only=self._maker,  # maker mode: rest on our own side instead of crossing
         )
         ctx = TradeContext(
             side=plan.side,
@@ -254,12 +267,13 @@ class Trader:
             + self._price_fmt
             + " best="
             + self._price_fmt
-            + " coi=%d",
+            + " coi=%d post_only=%s",
             "SELL" if order.is_ask else "BUY",
             order.size / self.meta.size_scale,
             order.limit_price / scale,
             plan.estimate.best_price / scale,
             order.client_order_index,
+            order.post_only,
         )
 
     async def _submit_entry(self, order: ActiveOrder, ctx: TradeContext) -> None:
@@ -275,7 +289,12 @@ class Trader:
             return  # already resolved by the account stream, or recovery took over
         if result.accepted:
             self._reject_streak = 0
-            self._arm_resolve(order)
+            if not order.post_only:
+                self._arm_resolve(order)
+            elif order.cancel_requested:
+                await self._submit_cancel(order)  # withdrawn before the exchange had acknowledged it
+            else:
+                self._arm("rest", self.cfg.maker_rest_ms / 1000.0, partial(self._cancel_entry, "REST_TIMEOUT"))
             return
         self._apply_error_policy(result)
         if result.ambiguous:
@@ -289,12 +308,70 @@ class Trader:
         if self.sm.state is State.ENTRY_PENDING:
             self.sm.transition(State.FLAT, f"ENTRY_REJECTED:{result.error_class.value if result.error_class else ''}")
 
+    # ===================================================== resting (maker) entry
+
+    def _watch_resting_entry(self, now_ns: int) -> None:
+        """Each market event while the entry rests: withdraw it once its reason is gone."""
+        order = self.entry_order
+        if order is None or not order.post_only or order.cancel_requested:
+            return
+        bids = self.market.top_bids
+        asks = self.market.top_asks
+        if self.blocks:
+            self._cancel_entry("ENTRIES_BLOCKED")
+        elif not bids or not asks or not self.book.valid:
+            self._cancel_entry("NO_MARKET_DATA")
+        else:
+            # How far the touch on our side has run away from the order (positive: left behind).
+            away = order.limit_price - asks[0][0] if order.is_ask else bids[0][0] - order.limit_price
+            drift = self.cfg.maker_max_drift_mbps
+            if drift and away * MBPS_DENOM > order.limit_price * drift:
+                self._cancel_entry("PRICE_MOVED_AWAY")
+                return
+            signal = self.signals.compute(now_ns)
+            self.last_signal = signal
+            if signal.side == (LONG if order.is_ask else SHORT):
+                self._cancel_entry("SIGNAL_REVERSED")
+
+    def _cancel_entry(self, reason: str) -> None:
+        """Withdraw the resting entry. The state only moves on when the exchange confirms the
+        order is finished, because it can still fill until the cancel takes effect."""
+        self._cancel("rest")
+        order = self.entry_order
+        if order is None or not order.post_only or order.terminal or order.cancel_requested:
+            return
+        if self.sm.state in (State.RECOVERY, State.HALTED):
+            return  # the flatten path cancels every bot order itself
+        order.cancel_requested = True
+        self.metrics.entries_cancelled += 1
+        log.info("ENTRY_CANCEL reason=%s coi=%d filled=%d", reason, order.client_order_index, order.filled)
+        if order.acked:
+            self._spawn(self._submit_cancel(order))
+
+    async def _submit_cancel(self, order: ActiveOrder) -> None:
+        result = await self.executor.cancel_order(order.client_order_index)
+        if order is not self.entry_order or order.terminal:
+            return
+        if not result.accepted:
+            log.warning("ENTRY_CANCEL_NOT_ACCEPTED coi=%d message=%s", order.client_order_index, result.message)
+            if result.error_class is ErrorClass.AUTH_ERROR:
+                self._apply_error_policy(result)
+        # Whatever the answer, the order's final state must now arrive on the account stream
+        # (cancelled, or filled first). If it does not, recovery reads the truth and flattens.
+        self._arm_resolve(order)
+
     # ===================================================================== exits
 
     def _evaluate_exit(self, now_ns: int) -> None:
         """Run on every market event while exposure exists. GREEN triggers an immediate exit."""
         pos = self.position
         if pos is None or pos.size <= 0:
+            return
+        entry = self.entry_order
+        if entry is not None and entry.post_only and not entry.terminal:
+            # Part of a resting entry filled. A reduce-only exit is never sent while the rest
+            # can still fill: withdraw it first; the exit engine takes over once it is gone.
+            self._cancel_entry("PARTIAL_FILL")
             return
         levels = self.market.top_bids if pos.side == LONG else self.market.top_asks
         if not levels or not self.book.valid:
@@ -533,6 +610,8 @@ class Trader:
         if fill.is_taker and fill.fee_tick > self.fee_tick:
             log.warning("FEE_RATE_HIGHER_THAN_EXPECTED observed_tick=%d assumed_tick=%d", fill.fee_tick, self.fee_tick)
             self.fee_tick = fill.fee_tick
+        elif not fill.is_taker and fill.fee_tick > self.maker_fee_tick:
+            self.maker_fee_tick = fill.fee_tick
         order = self._orders.get(fill.client_order_index)
         if order is None:
             return
@@ -595,7 +674,8 @@ class Trader:
                 self.metrics.count_error(ErrorClass.STATE_MISMATCH)
                 self._request_resync("ORPHAN_FILL")
             return
-        fee = fee_q(d_quote, self.fee_tick) if d_quote > 0 else 0
+        tick = self.maker_fee_tick if order.post_only else self.fee_tick
+        fee = fee_q(d_quote, tick) if d_quote > 0 else 0
         if order.kind is OrderKind.ENTRY:
             if self.position is None:
                 self.position = Position(side=SHORT if order.is_ask else LONG, opened_ns=now_ns)
@@ -606,6 +686,8 @@ class Trader:
             order.applied_quote_q = order.filled_quote_q
             if not order.terminal:
                 self.sm.try_transition(State.PARTIALLY_FILLED, "ENTRY_PARTIAL")
+                if order.post_only and order.filled < order.size:
+                    self._cancel_entry("PARTIAL_FILL")
         else:
             pos = self.position
             if pos is None:
@@ -619,6 +701,7 @@ class Trader:
     def _on_order_terminal(self, order: ActiveOrder, now_ns: int) -> None:
         if order is self.entry_order:
             self._cancel("resolve_entry")
+            self._cancel("rest")
             self.entry_order = None
             self._on_entry_done(order, now_ns)
         elif order is self.exit_order:
@@ -741,7 +824,7 @@ class Trader:
         self._exit_reason = ""
         self._exit_emergency = False
         self._exit_attempts = 0
-        for name in ("hold", "resolve_entry", "resolve_exit", "exit_retry", "account_grace"):
+        for name in ("hold", "rest", "resolve_entry", "resolve_exit", "exit_retry", "account_grace"):
             self._cancel(name)
 
     # ================================================================== policies
@@ -846,6 +929,8 @@ class Trader:
         """Health monitor: market data went stale. With exposure this is an emergency."""
         if self.sm.state in EXPOSED_STATES or self.sm.state in (State.EXIT_PENDING, State.PARTIAL_EXIT):
             self._start_recovery("MARKET_DATA_STALE")
+        elif self.sm.state is State.ENTRY_PENDING:
+            self._cancel_entry("MARKET_DATA_STALE")
 
     def _track(self, order: ActiveOrder) -> None:
         orders = self._orders
@@ -895,23 +980,4 @@ class Trader:
 
     def snapshot_state(self, last_event: str = "") -> dict[str, Any]:
         """Small recovery snapshot persisted on every transition and heartbeat."""
-        pos = self.position
-        return {
-            "state": self.sm.state.value,
-            "heartbeat": utc_iso(),
-            "last_event": last_event,
-            "last_client_order_index": self.ids.last,
-            "trade_id": self.ctx.trade_id if self.ctx is not None else None,
-            "entry_order": self.entry_order.client_order_index if self.entry_order else None,
-            "exit_order": self.exit_order.client_order_index if self.exit_order else None,
-            "position": None
-            if pos is None
-            else {
-                "side": pos.side,
-                "size": pos.size,
-                "cost_q": pos.cost_q,
-                "entry_size": pos.entry_size,
-                "exit_size": pos.exit_size,
-                "adopted": pos.adopted,
-            },
-        }
+        return recovery_snapshot(self, last_event)

@@ -196,6 +196,7 @@ class Engine:
             journal=journal,
             ids=ids,
             fee_tick=session.taker_fee_tick,
+            maker_fee_tick=session.tier.maker_fee_tick,
         )
         holder.append(trader)
         reconciler = Reconciler(trader, client, executor, cfg)

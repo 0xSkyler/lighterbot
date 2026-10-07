@@ -48,6 +48,7 @@ class Limits:
     normal_slip_mbps: int
     emergency_slip_mbps: int
     buffer_mbps: int
+    maker_improve_ticks: int = 0
 
     @classmethod
     def from_config(cls, cfg: Config, meta: MarketMeta) -> Limits:
@@ -66,6 +67,7 @@ class Limits:
             normal_slip_mbps=cfg.max_normal_exit_slippage_mbps,
             emergency_slip_mbps=cfg.max_emergency_exit_slippage_mbps,
             buffer_mbps=cfg.safety_buffer_mbps,
+            maker_improve_ticks=cfg.maker_improve_ticks,
         )
 
     def min_profit_for(self, cost_q: int) -> int:
@@ -92,7 +94,7 @@ def plan_entry(
     meta: MarketMeta,
     available_balance_q: int | None,
     volatility_mbps: int,
-    taker_fee_tick: int,
+    fee_tick: int,
 ) -> tuple[EntryPlan | None, str]:
     """Size an entry and run every market-quality gate.
 
@@ -116,10 +118,53 @@ def plan_entry(
         return None, "DEPTH"
     if available_balance_q is None:
         return None, "BALANCE_UNKNOWN"
-    margin_q = ceil_div(estimate.value_q * limits.imf, IMF_DENOM) + fee_q(estimate.value_q, taker_fee_tick)
+    margin_q = ceil_div(estimate.value_q * limits.imf, IMF_DENOM) + fee_q(estimate.value_q, fee_tick)
     if available_balance_q * 100 < margin_q * 105:
         return None, "BALANCE"
     return EntryPlan(side, size, estimate.limit_price, estimate, margin_q), ""
+
+
+def plan_maker_entry(
+    side: int,
+    bids: Sequence[tuple[int, int]],
+    asks: Sequence[tuple[int, int]],
+    *,
+    limits: Limits,
+    meta: MarketMeta,
+    available_balance_q: int | None,
+    volatility_mbps: int,
+    fee_tick: int,
+) -> tuple[EntryPlan | None, str]:
+    """Size a resting (post-only) entry on our own side of the book.
+
+    A long rests at the best bid, a short at the best ask, improved by up to
+    ``MAKER_IMPROVE_TICKS`` when the spread has room, and always at least one tick away
+    from the opposite side so the order can never cross. There is no depth walk:
+    nothing is taken from the book.
+    """
+    if not bids or not asks:
+        return None, "NO_BOOK"
+    bid = bids[0][0]
+    ask = asks[0][0]
+    if ask <= bid:
+        return None, "NO_BOOK"
+    if spread_mbps(bid, ask) > limits.max_spread_mbps:
+        return None, "SPREAD"
+    if volatility_mbps > limits.max_volatility_mbps:
+        return None, "VOLATILITY"
+    improve = limits.maker_improve_ticks
+    price = min(bid + improve, ask - 1) if side == LONG else max(ask - improve, bid + 1)
+    size = meta.size_for_notional(limits.notional_q, price)
+    if size < meta.min_size_at(price):
+        return None, "SIZE_BELOW_MIN"
+    if available_balance_q is None:
+        return None, "BALANCE_UNKNOWN"
+    value_q = price * size
+    margin_q = ceil_div(value_q * limits.imf, IMF_DENOM) + fee_q(value_q, fee_tick)
+    if available_balance_q * 100 < margin_q * 105:
+        return None, "BALANCE"
+    estimate = EntryEstimate(size, size, True, value_q, price, price, price, 0)
+    return EntryPlan(side, size, price, estimate, margin_q), ""
 
 
 def hard_loss_reason(

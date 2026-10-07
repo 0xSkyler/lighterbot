@@ -43,6 +43,7 @@ BASE_ENV: dict[str, str] = {
     "MAX_SPREAD_BPS": "1.0",
     "MARKET_DATA_STALE_MS": "1000",
     "ENTRY_SCORE_THRESHOLD": "0.6",
+    "ENTRY_MODE": "taker",  # most tests exercise the IOC path; maker tests override this
 }
 
 

@@ -93,6 +93,8 @@ class FakeExecutor:
         self.submitted: list[ActiveOrder] = []
         self.results: deque[SendResult] = deque()
         self.gate: asyncio.Event | None = None  # when set, submissions wait until released
+        self.cancels: list[int] = []  # order references passed to cancel_order
+        self.cancel_results: deque[SendResult] = deque()
 
     async def submit(self, order: ActiveOrder) -> SendResult:
         self.submitted.append(order)
@@ -103,6 +105,10 @@ class FakeExecutor:
         order.ack_ns = result.ack_ns
         order.acked = result.accepted
         return result
+
+    async def cancel_order(self, order_ref: int) -> SendResult:
+        self.cancels.append(order_ref)
+        return self.cancel_results.popleft() if self.cancel_results else accepted()
 
 
 class FakeJournal:
@@ -150,6 +156,7 @@ class FakeClient:
         self.balance = Decimal("100")
         self.active_orders: list[OrderUpdate] = []
         self.finished_orders: dict[int, OrderUpdate] = {}
+        self.resting_price: dict[int, int] = {}  # client order index -> price of a resting order
         self.bbo = (px(83691.1), px(83693.9))
         self.nonce = 100
         self.nonce_fetches = 0
@@ -229,15 +236,71 @@ class FakeClient:
         if kind == "order":
             self._execute(entry["order"])
         elif kind == "cancel":
-            self.active_orders = [o for o in self.active_orders if o.client_order_index != entry["order_ref"]]
+            self._cancel_resting(lambda o: o.client_order_index == entry["order_ref"])
         elif kind == "cancel_all":
-            self.active_orders = []
+            self._cancel_resting(lambda o: True)
         elif kind == "leverage" and self.on_leverage is not None:
             self.on_leverage(entry["imf"], entry["margin_mode"])
         return result
 
+    def _set_open_orders(self) -> None:
+        p = self.position
+        count = len(self.active_orders)
+        self.position = ExchangePosition(p.signed_size, p.avg_entry_price, count, 0, p.imf, p.margin_mode, 0)
+
+    def _cancel_resting(self, match: Callable[[OrderUpdate], bool]) -> None:
+        for o in [o for o in self.active_orders if match(o)]:
+            self.active_orders.remove(o)
+            done = OrderUpdate(
+                o.client_order_index, o.order_index, o.market_id, o.is_ask, "canceled", 0, 0, o.remaining, False
+            )
+            self.finished_orders[o.client_order_index] = done
+            if self.stream is not None:
+                self.stream(done)
+        self._set_open_orders()
+
+    def fill_resting(self, client_order_index: int) -> OrderUpdate:
+        """A counterparty trades against one of our resting orders in full."""
+        o = next(o for o in self.active_orders if o.client_order_index == client_order_index)
+        self.active_orders.remove(o)
+        size = o.remaining
+        p = self.position
+        new_size = p.signed_size + (-size if o.is_ask else size)
+        self.position = ExchangePosition(
+            new_size, self.resting_price[client_order_index], 0, 0, p.imf, p.margin_mode, 0
+        )
+        self._set_open_orders()
+        done = OrderUpdate(
+            client_order_index,
+            o.order_index,
+            o.market_id,
+            o.is_ask,
+            "filled",
+            size,
+            size * self.resting_price[client_order_index],
+            0,
+            False,
+        )
+        self.finished_orders[client_order_index] = done
+        if self.stream is not None:
+            self.stream(done)
+        return done
+
     def _execute(self, order: ActiveOrder) -> None:
-        """Fill an accepted order against the simulated position (reduce-only never reverses)."""
+        """Fill an accepted order against the simulated position (reduce-only never reverses).
+
+        A post-only order rests instead: it fills only through ``fill_resting``.
+        """
+        if order.post_only:
+            resting = OrderUpdate(
+                order.client_order_index, 1, self.meta.market_id, order.is_ask, "open", 0, 0, order.size, False
+            )
+            self.active_orders.append(resting)
+            self.resting_price[order.client_order_index] = order.limit_price
+            self._set_open_orders()
+            if self.stream is not None:
+                self.stream(resting)
+            return
         p = self.position
         delta = -order.size if order.is_ask else order.size
         price = self.bbo[0] if order.is_ask else self.bbo[1]

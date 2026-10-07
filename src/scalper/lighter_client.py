@@ -40,6 +40,7 @@ log = logging.getLogger("scalper.client")
 
 READ_RETRIES = 2
 KEEPALIVE_SECONDS = 90.0
+POST_ONLY_EXPIRY_MS = 10 * 60 * 1000  # Lighter's minimum is 5 minutes
 _NETWORK_ERRORS = (aiohttp.ClientError, asyncio.TimeoutError, OSError)
 
 
@@ -396,8 +397,16 @@ class LighterClient:
         return SignedTx(int(tx_type), str(tx_info), str(tx_hash), nonce, time.monotonic_ns())
 
     def sign_order(self, order: ActiveOrder, market_id: int, nonce: int) -> SignedTx:
-        """Sign an IOC order: LIMIT+IOC (strict per-fill cap) or MARKET+IOC (worst-price bound)."""
+        """Sign an order: LIMIT+IOC (strict per-fill cap), MARKET+IOC (worst-price bound) or,
+        for ``order.post_only``, a resting LIMIT that the exchange rejects if it would cross."""
         signer = self._signer
+        if order.post_only:
+            time_in_force = signer.ORDER_TIME_IN_FORCE_POST_ONLY
+            # The bot cancels long before this; the expiry only bounds an order orphaned by a crash.
+            expiry = int(time.time() * 1000) + POST_ONLY_EXPIRY_MS
+        else:
+            time_in_force = signer.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+            expiry = signer.DEFAULT_IOC_EXPIRY
         return self._signed(
             signer.sign_create_order(
                 market_index=market_id,
@@ -406,10 +415,10 @@ class LighterClient:
                 price=order.limit_price,
                 is_ask=int(order.is_ask),
                 order_type=signer.ORDER_TYPE_MARKET if order.market_order else signer.ORDER_TYPE_LIMIT,
-                time_in_force=signer.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                time_in_force=time_in_force,
                 reduce_only=int(order.reduce_only),
                 trigger_price=signer.NIL_TRIGGER_PRICE,
-                order_expiry=signer.DEFAULT_IOC_EXPIRY,
+                order_expiry=expiry,
                 nonce=nonce,
                 api_key_index=self._cfg.api_key_index,
             ),

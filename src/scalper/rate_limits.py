@@ -152,11 +152,14 @@ class RateLimiter:
                 return False
         return True
 
-    def can_enter(self) -> bool:
-        """True if an entry *and* its exit fit while leaving the exit reserve untouched."""
+    def can_enter(self, tx_count: int = 2) -> bool:
+        """True if an entry *and* its exit fit while leaving the exit reserve untouched.
+
+        ``tx_count`` is 3 for a resting entry, which may also need a cancel.
+        """
         if self._entries.headroom(self._clock()) < 1:
             return False
-        return self._has_headroom(2)
+        return self._has_headroom(tx_count)
 
     def can_send_optional(self) -> bool:
         """True if one opportunistic transaction fits without eating the exit reserve."""

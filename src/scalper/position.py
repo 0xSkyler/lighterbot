@@ -113,10 +113,12 @@ class ActiveOrder:
     size: int
     limit_price: int
     reduce_only: bool
-    market_order: bool  # True: MARKET+IOC, False: LIMIT+IOC
+    market_order: bool  # True: MARKET+IOC, False: LIMIT (IOC, or resting when post_only)
     reason: str
     created_ns: int
     emergency: bool = False
+    post_only: bool = False  # resting maker order: rejected by the exchange if it would cross
+    cancel_requested: bool = False  # a cancel was decided for this resting order
     tx_hash: str = ""
     signed_ns: int = 0
     sent_ns: int = 0
