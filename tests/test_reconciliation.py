@@ -513,3 +513,42 @@ async def test_recovery_halts_when_credentials_are_rejected() -> None:
     system.reconciler.start_recovery("TEST")
     await system.reconciler.wait_idle()
     assert system.trader.sm.state is State.HALTED and system.trader.fatal_reason is not None
+
+
+# ---------------------------------------------------------- operator flatten
+
+
+async def test_operator_flatten_closes_an_open_position_and_books_it() -> None:
+    system = await started()
+    size = await open_long(system)
+    system.reconciler.manual_flatten()
+    await system.reconciler.wait_idle()
+    assert system.trader.sm.state is State.FLAT and system.client.position.signed_size == 0
+    close = system.client.signed[-1]["order"]
+    assert close.reduce_only and close.is_ask and close.size == size
+    assert system.journal.trades[0]["exit_reason"] == "MANUAL_FLATTEN"
+
+
+async def test_operator_flatten_while_flat_checks_the_exchange_and_sends_nothing() -> None:
+    system = await started()
+    reads = system.client.account_reads
+    sent = len(system.client.sent)
+    system.reconciler.manual_flatten()
+    await system.reconciler.wait_idle()
+    assert system.trader.sm.state is State.FLAT
+    assert system.client.account_reads > reads  # flat was confirmed by the exchange, not assumed
+    assert len(system.client.sent) == sent
+
+
+async def test_operator_flatten_works_even_when_trading_is_halted() -> None:
+    system = make_system(make_config(EXISTING_POSITION_ACTION="halt"))
+    system.client.position = exchange_position(300, ENTRY_ASK)
+    await system.reconciler.startup()
+    assert system.trader.sm.state is State.HALTED and system.client.sent == []
+    system.reconciler.manual_flatten()  # the operator asking for flat always wins
+    await system.reconciler.wait_idle()
+    assert system.client.position.signed_size == 0
+    close = system.client.signed[-1]["order"]
+    assert close.reduce_only and close.size == 300
+    assert system.trader.sm.state is State.HALTED  # still halted: flattening does not resume trading
+    assert "MANUAL_FLATTEN" in system.journal.event_kinds()

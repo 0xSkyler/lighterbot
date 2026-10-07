@@ -1,0 +1,53 @@
+[Unit]
+Description=Lighter BTC scalper control panel (local web UI)
+Documentation=https://github.com/0xSkyler/lighterbot
+After=network.target
+
+[Service]
+Type=simple
+User=scalper
+Group=scalper
+WorkingDirectory=/var/lib/lighter-scalper
+Environment=PYTHONUNBUFFERED=1
+Environment=SCALPER_ENV_FILE=/etc/lighter-scalper/lighter-scalper.env
+Environment=DATA_DIR=/var/lib/lighter-scalper
+Environment=LOG_DIR=/var/log/lighter-scalper
+# The panel can start live trading and is plain HTTP: keep it on the loopback interface and
+# reach it from the machine's own desktop (RustDesk) or through an SSH tunnel.
+Environment=UI_HOST=127.0.0.1
+Environment=UI_PORT=8787
+Environment=UI_SERVICE_MODE=systemd
+ExecStart=/opt/lighter-scalper/.venv/bin/lighter-scalper ui
+
+# The panel is independent of the trading service: restarting it never touches the bot.
+Restart=always
+RestartSec=5
+
+MemoryMax=256M
+TasksMax=128
+LimitNOFILE=1024
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+# Data (status, journal, panel password hash), logs, and the bot's environment file (Settings tab).
+ReadWritePaths=/var/lib/lighter-scalper /var/log/lighter-scalper /etc/lighter-scalper
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

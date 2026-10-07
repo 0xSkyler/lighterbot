@@ -133,6 +133,28 @@ class Reconciler:
             return
         self._launch_recovery(reason)
 
+    def manual_flatten(self) -> None:
+        """Operator request: close any BTC exposure now through the authoritative flatten path.
+
+        Works in every state, including HALTED (where normal recovery is refused): the operator
+        asking for flat always wins.
+        """
+        if self._trader.sm.state is State.HALTED:
+            if not self.busy:
+                self._launch(self._flatten_while_halted())
+            return
+        self.start_recovery("MANUAL_FLATTEN")
+
+    async def _flatten_while_halted(self) -> None:
+        trader = self._trader
+        log.warning("MANUAL_FLATTEN state=HALTED")
+        result = await self._executor.flatten_position("MANUAL_FLATTEN", get_bbo=self._fresh_bbo)
+        if result.final_position is not None:
+            trader.exch_pos = result.final_position
+        trader.journal.record_event(
+            "MANUAL_FLATTEN", {"flat": result.flat, "attempts": result.attempts, "state": "HALTED"}
+        )
+
     def request_resync(self, reason: str) -> None:
         """Reconcile against the exchange. Coalesced if something is already running."""
         if self._trader.sm.state is State.HALTED:

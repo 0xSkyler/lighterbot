@@ -43,6 +43,10 @@ class ConfigError(ScalperError):
 
     error_class = ErrorClass.CONFIG_ERROR
 
+    def __init__(self, message: str, problems: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.problems: list[str] = list(problems) if problems else [message]
+
 
 class FatalError(ScalperError):
     """Unrecoverable condition (bad credentials, market missing). Service stays down."""

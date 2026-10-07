@@ -4,6 +4,7 @@
     lighter-scalper flatten   emergency: cancel BTC orders and close the BTC position
     lighter-scalper status    show the service snapshot and the exchange's view
     lighter-scalper check     validate configuration and connectivity; sends no orders
+    lighter-scalper ui        serve the local web control panel (monitor, start/stop, pause, flatten)
 
 There is no paper, shadow or testnet mode. ``run`` and ``flatten`` act on the
 live mainnet account named in the environment.
@@ -202,6 +203,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         listener.stop()
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Serve the control panel. It must work before the trading configuration is complete."""
+    from .ui.server import config_from_env, run_ui
+
+    env_file = Path(args.env_file) if args.env_file else None
+    return run_ui(config_from_env(args.host, args.port, env_file), open_browser=args.open)
+
+
 # ----------------------------------------------------------------------- main
 
 
@@ -222,6 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("check", help="validate configuration and connectivity without sending orders").set_defaults(
         func=cmd_check
     )
+    ui = sub.add_parser("ui", help="serve the local web control panel")
+    ui.add_argument("--host", help="address to listen on (default 127.0.0.1)")
+    ui.add_argument("--port", type=int, help="port to listen on (default 8787)")
+    ui.add_argument("--open", action="store_true", help="open the panel in the default browser")
+    ui.set_defaults(func=cmd_ui)
     return parser
 
 

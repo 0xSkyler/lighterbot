@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Update an installed Lighter BTC scalper from GitHub and restart it.
+# Update an installed Lighter BTC scalper from GitHub.
 #
 #   cd lighterbot
 #   sudo ./deploy/update.sh
 #
-# Steps: git pull --ff-only -> dependency update -> service restart.
-# The restart sends SIGTERM: the service resolves in-flight orders and flattens (unless
-# SHUTDOWN_POSITION_ACTION=keep), and the new process reconciles with the exchange before
-# it trades. Local state (/var/lib/lighter-scalper) and the environment file are never touched.
+# Steps: git pull --ff-only -> dependencies, units and permissions -> restart.
+# The control panel is always restarted. The trading service is restarted only if it was
+# running: an update never starts live trading that you had stopped. A restart sends SIGTERM,
+# so the bot resolves in-flight orders and flattens (unless SHUTDOWN_POSITION_ACTION=keep),
+# and the new process reconciles with the exchange before it trades.
+# Local state (/var/lib/lighter-scalper) and the environment file are never touched.
 set -euo pipefail
 
 APP_DIR="/opt/lighter-scalper"
@@ -33,18 +35,14 @@ else
 fi
 echo "    now at $(git -C "${REPO_DIR}" -c safe.directory="${REPO_DIR}" rev-parse --short HEAD)"
 
-echo "==> dependencies"
-"${APP_DIR}/.venv/bin/python" -m pip install --quiet -r "${REPO_DIR}/requirements.txt"
-"${APP_DIR}/.venv/bin/python" -m pip install --quiet --no-deps --force-reinstall "${REPO_DIR}"
+# Dependencies, unit files, permissions and the control panel (restarted by the installer).
+bash "${REPO_DIR}/deploy/install.sh" --upgrade
 
-echo "==> systemd unit"
-if ! cmp -s "${REPO_DIR}/deploy/${UNIT}" "/etc/systemd/system/${UNIT}"; then
-    install -m 0644 -o root -g root "${REPO_DIR}/deploy/${UNIT}" "/etc/systemd/system/${UNIT}"
-    systemctl daemon-reload
-    echo "    unit file updated"
+if systemctl is-active --quiet "${UNIT}"; then
+    echo "==> restarting the trading service (it was running)"
+    systemctl restart "${UNIT}"
+    sleep 2
+else
+    echo "==> the trading service was not running: left stopped"
 fi
-
-echo "==> restart"
-systemctl restart "${UNIT}"
-sleep 2
-systemctl --no-pager --lines=15 status "${UNIT}" || true
+systemctl --no-pager --lines=10 status "${UNIT}" || true

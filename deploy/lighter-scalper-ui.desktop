@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Lighter Scalper Control Panel
+Comment=Monitor and control the Lighter BTC scalper
+Exec=xdg-open http://127.0.0.1:8787
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Office;Finance;

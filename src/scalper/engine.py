@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from decimal import Decimal
 from . import __version__
 from .account_stream import AccountStream
 from .config import Config
+from .control import Command, ControlInbox, is_paused, purge_commands
 from .errors import EXIT_FATAL, EXIT_OK, ConfigError, ErrorClass, FatalError, ScalperError
 from .execution import Executor
 from .health import HealthMonitor, sd_notify
@@ -30,7 +32,7 @@ from .lighter_client import AccountTier, LighterClient
 from .market_data import MarketDataStream
 from .metrics import Metrics, utc_date
 from .orderbook import OrderBook
-from .persistence import Journal
+from .persistence import Journal, utc_iso
 from .position import ClientOrderIds
 from .precision import MarketMeta
 from .rate_limits import RateLimiter, limits_for_tier
@@ -198,6 +200,12 @@ class Engine:
         holder.append(trader)
         reconciler = Reconciler(trader, client, executor, cfg)
         trader.recovery = reconciler
+        # Operator control (control panel / CLI). Stale commands from before this start are
+        # discarded; a pause that was in force stays in force.
+        purge_commands(cfg.data_dir)
+        if is_paused(cfg.data_dir):
+            trader.blocks["PAUSED"] = "entries paused by the operator"
+            log.warning("ENTRIES PAUSED: the pause set before this start is still in force")
         account = AccountStream(cfg, meta, lambda: client.auth_token(force=True), metrics, trader)
         health = HealthMonitor(
             cfg=cfg,
@@ -258,9 +266,42 @@ class Engine:
         log.info("LIVE EXECUTION: %s", "HALTED" if trader.sm.state is State.HALTED else "ENABLED")
         sd_notify("READY=1")
 
-        await self._supervise()
+        # The pause flag is the source of truth. It may have been changed from the panel while this
+        # process was starting, so apply whatever it says now, before commands are accepted.
+        if is_paused(cfg.data_dir):
+            trader.blocks.setdefault("PAUSED", "entries paused by the operator")
+        else:
+            trader.blocks.pop("PAUSED", None)
+        inbox = ControlInbox(cfg.data_dir, loop, lambda command: self._on_command(command, trader, reconciler))
+        inbox.start()
+        try:
+            await self._supervise()
+        finally:
+            inbox.stop()
         await self._shutdown(trader, reconciler, market, account)
         return trader
+
+    def _on_command(self, command: Command, trader: Trader, reconciler: Reconciler) -> None:
+        """Apply one operator command. Runs on the event loop; never blocks."""
+        name = command.name
+        result = "ok"
+        if name == "pause":
+            trader.blocks["PAUSED"] = "entries paused by the operator"
+        elif name == "resume":
+            trader.blocks.pop("PAUSED", None)
+        elif name == "flatten":
+            # Flat means flat: stop opening positions first, then close what is there.
+            trader.blocks["PAUSED"] = "entries paused by the operator (flatten)"
+            reconciler.manual_flatten()
+        elif name == "stop":
+            if os.environ.get("INVOCATION_ID"):
+                # Under systemd an exit would simply be restarted: stopping is systemctl's job.
+                result = "ignored: managed by systemd, use systemctl stop"
+            else:
+                self.request_stop(EXIT_OK)
+        trader.last_command = {"id": command.id, "command": name, "at": utc_iso(), "result": result}
+        log.warning("CONTROL command=%s id=%s result=%s state=%s", name, command.id, result, trader.sm.state.value)
+        trader.journal.record_event("CONTROL", {"command": name, "id": command.id, "result": result})
 
     async def _wait_for(self, ready: Callable[[], bool], limit_s: float, what: str) -> None:
         loop = asyncio.get_running_loop()

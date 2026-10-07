@@ -68,6 +68,8 @@ Lighter WebSocket (public)            Lighter WebSocket (authenticated)
 | `persistence.py`, `trade_record.py`, `metrics.py` | SQLite journal (writer thread), per-trade record, rolling statistics |
 | `health.py`, `status.py`, `logging_setup.py` | Watchdog and heartbeat, status view, non-blocking rotating logs |
 | `engine.py`, `main.py` | Startup sequence, task supervision, graceful shutdown, CLI |
+| `control.py` | Operator command channel (pause / resume / flatten / stop) and the persisted pause flag |
+| `ui/` | Local web control panel: a separate process that never shares the trading event loop |
 
 Hot-path rules: prices and sizes are exchange-native integers; no disk I/O, no database, no
 HTTP logging and no pandas/numpy on the trading path. Logging and persistence only enqueue;
@@ -227,15 +229,87 @@ sudo ./deploy/install.sh
 The script installs OS packages, creates the `scalper` system user, a virtualenv in
 `/opt/lighter-scalper/.venv` with the exact versions in `requirements.txt`, the directories
 `/var/lib/lighter-scalper` (state) and `/var/log/lighter-scalper` (logs), the environment file
-`/etc/lighter-scalper/lighter-scalper.env` (mode 600, root only, credentials empty), the
-`lighter-scalper` command and the systemd unit (enabled, **not started**).
+`/etc/lighter-scalper/lighter-scalper.env` (readable by root and the service user only, credentials
+empty), the `lighter-scalper` command, the trading service (enabled, **not started**) and the
+control panel service (started; it does not trade).
 
-Then:
+Then either use the control panel (next section), or a terminal:
 
 ```bash
 sudo nano /etc/lighter-scalper/lighter-scalper.env   # credentials, risk settings, the two safety gates
 sudo lighter-scalper check                           # validates everything; sends no order
 sudo systemctl start lighter-scalper                 # LIVE
+```
+
+## Control panel
+
+A local web page for watching and controlling the bot: `http://127.0.0.1:8787` on the machine that
+runs it. It is a separate process from the trading service, so it cannot slow the bot down, and
+restarting or closing it never touches the bot.
+
+### Opening it with RustDesk
+
+The panel listens on the loopback interface only. Pick the setup that matches yours:
+
+1. **RustDesk into the server itself.** The server needs a desktop session and a browser (a
+   minimal VPS has neither; install a light desktop such as XFCE, a browser, and RustDesk's Linux
+   package first). Connect with RustDesk, open the browser, go to `http://127.0.0.1:8787`.
+   A "Lighter Scalper Control Panel" entry is added to the applications menu.
+2. **RustDesk into another computer (for example your home PC), server stays headless.** On that
+   computer open a terminal and forward the port, then browse to the same address:
+   ```bash
+   ssh -L 8787:127.0.0.1:8787 <user>@<server>
+   ```
+3. **Run the bot on a desktop PC instead of a server** (Windows, macOS or Linux without systemd)
+   and RustDesk into that PC:
+   ```bash
+   python -m venv .venv
+   .venv/bin/pip install -r requirements.txt && .venv/bin/pip install --no-deps .   # Windows: .venv\Scripts\pip
+   .venv/bin/lighter-scalper ui --open                                              # Windows: .venv\Scripts\lighter-scalper
+   ```
+   Settings are kept in `.env` in that folder; the panel starts and stops the bot itself.
+
+The first visit asks you to choose a panel password. To reset it, delete `ui_auth.json` in the data
+directory (`/var/lib/lighter-scalper` on a server) and reload the page.
+
+### What it shows
+
+- **Overview** - realized P&L today (from confirmed exit fills only), trades, win rate, the open
+  position with its executable exit price and estimated P&L, time held against `MAX_HOLD_MS`, bid /
+  ask / spread, the entry signal score against the threshold, a cumulative P&L chart, why entries
+  are blocked (if they are), execution latency, rate-limit usage and recent incidents.
+- **Trades** - every completed trade and per-day totals from the journal.
+- **Settings** - every setting with validation by the same code the bot uses. The API private key
+  can be entered or replaced but is never displayed.
+- **Logs** - the live bot log, with a warnings-and-errors filter.
+
+### What the buttons do
+
+| Button | Effect |
+| --- | --- |
+| **Start** | Starts live trading with the saved settings, after a confirmation. Refused while the configuration is incomplete |
+| **Stop** | Graceful stop: resolves any order in flight and flattens first (unless `SHUTDOWN_POSITION_ACTION=keep`) |
+| **Restart** | Stop, then start; the bot reconciles with the exchange before trading. Applies saved settings |
+| **Pause entries** | No new positions. An open position is still managed and closed by its rules. Survives restarts until you resume |
+| **Flatten now** | Cancels the bot's BTC orders, closes the BTC position reduce-only, and pauses entries. Works whether the bot is running, stopped or halted |
+
+Changes saved in Settings take effect the next time the bot starts.
+
+### Panel security
+
+- Loopback only by default. It refuses to listen on another address unless `UI_ALLOW_REMOTE=true`
+  is set, because it is plain HTTP and can start live trading; if you must reach it remotely, put it
+  behind an SSH tunnel or a private network (WireGuard, Tailscale), not on the open internet.
+- Password login (salted scrypt hash on disk), attempts throttled, sessions held in memory.
+- Every state-changing request needs the session's CSRF token; cross-site requests and requests
+  with a foreign `Host` header are refused; a strict Content-Security-Policy forbids inline or
+  third-party script. The page loads nothing from the internet.
+- The panel runs as the unprivileged `scalper` user. A polkit rule lets it start, stop and restart
+  the one unit `lighter-scalper.service` and nothing else.
+
+```bash
+sudo systemctl status lighter-scalper-ui      # the panel's own service
+sudo systemctl restart lighter-scalper-ui     # safe at any time: does not affect the bot
 ```
 
 ## Configuration (`.env` fields)
@@ -285,9 +359,14 @@ sudo journalctl -u lighter-scalper -f     # live logs
 sudo lighter-scalper status               # bot snapshot + the exchange's authoritative view
 sudo lighter-scalper status --watch       # refreshing terminal view (reads the local snapshot only)
 sudo lighter-scalper check                # config + connectivity check, no orders
+sudo lighter-scalper ui                   # serve the control panel by hand (normally a service)
 ```
 
+Everything above is also available in the control panel.
+
 ### Emergency
+
+In the control panel: **Flatten now** (closes the position and pauses entries), or **Stop**.
 
 ```bash
 sudo systemctl stop lighter-scalper       # stops trading and flattens the BTC position
@@ -326,10 +405,11 @@ sudo sqlite3 /var/lib/lighter-scalper/scalper.db \
 
 ```bash
 cd lighterbot
-sudo ./deploy/update.sh      # git pull --ff-only, dependencies, restart
+sudo ./deploy/update.sh      # git pull --ff-only, dependencies, units, restart
 ```
 
-State and the environment file are never touched by an update.
+The control panel is restarted. The trading service is restarted only if it was running, so an
+update never starts trading you had stopped. State and the environment file are never touched.
 
 ## First live run
 
@@ -357,11 +437,17 @@ exercised without a funded account, so treat the first session as commissioning:
 | No trades at all | Check `sudo lighter-scalper status`: entry blocks, spread vs `MAX_SPREAD_BPS`, `signal_score` vs `ENTRY_SCORE_THRESHOLD` |
 | `HALTED` | Deliberate stop (credentials rejected, or `EXISTING_POSITION_ACTION=halt` found a position). Resolve, then restart |
 | `EVENT_LOOP_STALL` | The VPS is starved of CPU; entries pause for 2 s after each stall |
+| Panel: Start/Stop says it is not allowed | The polkit rule is missing: re-run `sudo ./deploy/install.sh`, or use `systemctl` |
+| Panel: "This host name is not allowed" | You opened it by a name other than `127.0.0.1`/`localhost`; use the SSH tunnel, or list the name in `UI_ALLOWED_HOSTS` |
+| Panel shows "Bot: not running" while the service is active | The bot has not written a status snapshot for 5 s: check Logs |
+| Entries stay paused after a restart | Pausing is persistent by design: press **Resume entries** |
 
 ## Credential security
 
-- Secrets live only in the environment file (`chmod 600`, owned by root) or in your local `.env`.
-  `.gitignore` excludes them; only `.env.example` is committed.
+- Secrets live only in the environment file (mode 660, root and the `scalper` service user; no
+  other user can read it) or in your local `.env`. `.gitignore` excludes them; only `.env.example`
+  is committed.
+- The control panel never sends the private key to the browser and never logs setting values.
 - The private key is excluded from object reprs, and log output is passed through a redaction
   filter. Configuration errors never echo the key.
 - The service runs as the unprivileged `scalper` user with a read-only filesystem apart from its
@@ -374,18 +460,20 @@ exercised without a funded account, so treat the first session as commissioning:
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt && pip install -e ".[dev]"
-pytest                 # 274 deterministic tests, no network, no orders
+pytest                 # 360 deterministic tests, no network, no orders
 ruff check src tests && mypy
 ```
 
 The tests cover P&L and VWAP, order-book updates, spread, imbalance and every signal component,
 price/quantity rounding, the state machine, duplicate-order prevention, partial fills, reduce-only
 quantities, the rate-limit reserve, stale-data handling, nonce handling, the flatten procedure,
-startup/reconnect reconciliation, and the whole service running against a simulated exchange
-(`tests/test_engine.py`).
+startup/reconnect reconciliation, the whole service running against a simulated exchange
+(`tests/test_engine.py`), and the control panel (login, CSRF and host guards, settings validation,
+secret handling, service control, operator commands).
 
 Deliberately not included: paper/shadow trading, backtesting, other exchanges or markets, grid/DCA/
-martingale logic, Telegram or web control, LLM decisions, Docker (run it under systemd as above).
+martingale logic, Telegram control, trade commands from outside the machine, LLM decisions, Docker
+(run it under systemd as above).
 
 ## License
 

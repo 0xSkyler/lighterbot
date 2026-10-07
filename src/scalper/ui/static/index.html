@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Lighter BTC Scalper</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- Login / first-run setup -->
+<main id="auth" class="auth" hidden>
+  <form id="auth-form" class="auth-card" autocomplete="off">
+    <h1>Lighter BTC Scalper</h1>
+    <p id="auth-intro" class="muted"></p>
+    <label class="field">
+      <span id="auth-label">Password</span>
+      <input id="auth-password" type="password" autocomplete="current-password" required>
+    </label>
+    <label class="field" id="auth-confirm-row" hidden>
+      <span>Repeat the password</span>
+      <input id="auth-confirm" type="password" autocomplete="new-password">
+    </label>
+    <p id="auth-error" class="form-error" role="alert" hidden></p>
+    <button id="auth-submit" class="btn btn-primary btn-block" type="submit">Log in</button>
+  </form>
+</main>
+
+<!-- Control panel -->
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">Lighter BTC Scalper</span>
+      <span class="badge">LIVE &middot; MAINNET</span>
+    </div>
+    <div class="pills" aria-live="polite">
+      <span id="pill-service" class="pill" data-tone="idle"><span class="pill-icon" aria-hidden="true"></span><span class="pill-text">Service</span></span>
+      <span id="pill-state" class="pill" data-tone="idle"><span class="pill-icon" aria-hidden="true"></span><span class="pill-text">State</span></span>
+      <span id="pill-market" class="pill" data-tone="idle"><span class="pill-icon" aria-hidden="true"></span><span class="pill-text">Market data</span></span>
+      <span id="pill-account" class="pill" data-tone="idle"><span class="pill-icon" aria-hidden="true"></span><span class="pill-text">Account stream</span></span>
+    </div>
+    <div class="actions">
+      <button id="btn-start" class="btn btn-primary" type="button">Start</button>
+      <button id="btn-stop" class="btn" type="button">Stop</button>
+      <button id="btn-restart" class="btn" type="button">Restart</button>
+      <button id="btn-pause" class="btn" type="button">Pause entries</button>
+      <button id="btn-flatten" class="btn btn-danger" type="button">Flatten now</button>
+    </div>
+  </header>
+
+  <div id="banners" class="banners"></div>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" data-tab="overview" aria-selected="true" type="button">Overview</button>
+    <button class="tab" role="tab" data-tab="trades" aria-selected="false" type="button">Trades</button>
+    <button class="tab" role="tab" data-tab="settings" aria-selected="false" type="button">Settings</button>
+    <button class="tab" role="tab" data-tab="logs" aria-selected="false" type="button">Logs</button>
+    <span class="tabs-spacer"></span>
+    <span id="updated" class="muted small"></span>
+    <button id="btn-theme" class="btn btn-quiet" type="button">Theme: auto</button>
+    <button id="btn-logout" class="btn btn-quiet" type="button">Log out</button>
+  </nav>
+
+  <main class="content">
+
+    <!-- ============================== Overview ============================== -->
+    <section id="tab-overview" role="tabpanel">
+      <div class="grid">
+
+        <article class="card span-12">
+          <div class="hero-row">
+            <div class="hero">
+              <div class="card-label" id="hero-label">Realized P&amp;L today (UTC)</div>
+              <div id="hero-value" class="hero-value">&ndash;</div>
+              <div id="hero-sub" class="muted small"></div>
+            </div>
+            <div class="tiles">
+              <div class="tile"><div class="tile-label">Trades</div><div id="tile-trades" class="tile-value">&ndash;</div></div>
+              <div class="tile"><div class="tile-label">Wins / losses</div><div id="tile-wl" class="tile-value">&ndash;</div></div>
+              <div class="tile"><div class="tile-label">Win rate</div><div id="tile-winrate" class="tile-value">&ndash;</div></div>
+              <div class="tile"><div class="tile-label">Fees</div><div id="tile-fees" class="tile-value">&ndash;</div></div>
+              <div class="tile"><div class="tile-label">Median hold</div><div id="tile-hold" class="tile-value">&ndash;</div></div>
+              <div class="tile"><div class="tile-label">Trades last minute</div><div id="tile-tpm" class="tile-value">&ndash;</div></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card span-6">
+          <h2 class="card-title">Position</h2>
+          <div id="position-flat" class="empty">
+            <div class="empty-title" id="position-flat-title">Flat</div>
+            <div class="muted" id="position-flat-sub">No open position.</div>
+          </div>
+          <div id="position-open" hidden>
+            <div class="position-head">
+              <span id="position-side" class="side-chip"></span>
+              <span id="position-size" class="position-size"></span>
+              <span id="position-adopted" class="tag" hidden>adopted</span>
+            </div>
+            <dl class="kv">
+              <div><dt>Entry</dt><dd id="position-entry">&ndash;</dd></div>
+              <div><dt>Executable exit</dt><dd id="position-exit">&ndash;</dd></div>
+              <div><dt>Estimated P&amp;L if closed now</dt><dd id="position-pnl">&ndash;</dd></div>
+            </dl>
+            <div class="meter-block">
+              <div class="meter-head"><span>Holding time</span><span id="position-hold-text" class="num">&ndash;</span></div>
+              <div class="meter" id="position-hold-meter" role="img" aria-label="Holding time against the maximum"><div class="meter-fill"></div></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card span-6">
+          <h2 class="card-title">Market</h2>
+          <dl class="kv kv-3">
+            <div><dt>Bid</dt><dd id="market-bid">&ndash;</dd></div>
+            <div><dt>Ask</dt><dd id="market-ask">&ndash;</dd></div>
+            <div><dt>Spread</dt><dd id="market-spread">&ndash;</dd></div>
+          </dl>
+          <div class="meter-block">
+            <div class="meter-head"><span>Entry signal</span><span id="signal-text" class="num">&ndash;</span></div>
+            <div class="signal" id="signal" role="img" aria-label="Entry signal score">
+              <div class="signal-fill" id="signal-fill"></div>
+              <div class="signal-mid"></div>
+              <div class="signal-tick" id="signal-tick-low"></div>
+              <div class="signal-tick" id="signal-tick-high"></div>
+            </div>
+            <div class="signal-scale muted small"><span>&minus;1 short</span><span>0</span><span>long +1</span></div>
+          </div>
+          <dl class="kv kv-3">
+            <div><dt>Book age</dt><dd id="market-age">&ndash;</dd></div>
+            <div><dt>Feed lag</dt><dd id="market-lag">&ndash;</dd></div>
+            <div><dt>Available balance</dt><dd id="market-balance">&ndash;</dd></div>
+          </dl>
+        </article>
+
+        <article class="card span-8">
+          <div class="card-head">
+            <h2 class="card-title">Cumulative realized P&amp;L today</h2>
+            <button class="link" type="button" id="chart-table-link">View as table</button>
+          </div>
+          <div id="chart" class="chart" tabindex="0" role="img" aria-label="Cumulative realized profit and loss today">
+            <div id="chart-empty" class="empty"><div class="muted">No completed trades today.</div></div>
+            <div id="chart-tip" class="chart-tip" hidden></div>
+          </div>
+        </article>
+
+        <article class="card span-4">
+          <h2 class="card-title">Can it enter?</h2>
+          <div id="entry-status" class="entry-status"></div>
+          <ul id="blocks" class="blocks"></ul>
+          <div id="skips-wrap" hidden>
+            <div class="card-label">Signals skipped since start</div>
+            <ul id="skips" class="skips"></ul>
+          </div>
+        </article>
+
+        <article class="card span-5">
+          <h2 class="card-title">Execution latency (ms)</h2>
+          <table class="table table-compact">
+            <thead><tr><th scope="col">Step</th><th scope="col" class="num">Last</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th></tr></thead>
+            <tbody id="latency"></tbody>
+          </table>
+        </article>
+
+        <article class="card span-3">
+          <h2 class="card-title">Limits</h2>
+          <div class="meter-block">
+            <div class="meter-head"><span>Request budget used</span><span id="limit-text" class="num">&ndash;</span></div>
+            <div class="meter" id="limit-meter" role="img" aria-label="Rate limit budget used"><div class="meter-fill"></div></div>
+          </div>
+          <dl class="kv kv-1">
+            <div><dt>Account tier</dt><dd id="limit-tier">&ndash;</dd></div>
+            <div><dt>Entries last minute</dt><dd id="limit-entries">&ndash;</dd></div>
+            <div><dt>Leverage</dt><dd id="limit-leverage">&ndash;</dd></div>
+            <div><dt>Position size</dt><dd id="limit-notional">&ndash;</dd></div>
+          </dl>
+        </article>
+
+        <article class="card span-4">
+          <h2 class="card-title">Recent events</h2>
+          <ul id="events" class="events"></ul>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- =============================== Trades =============================== -->
+    <section id="tab-trades" role="tabpanel" hidden>
+      <div class="filters">
+        <label class="inline-field">
+          <span>Day (UTC)</span>
+          <select id="trades-date">
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="all">Most recent 200</option>
+          </select>
+        </label>
+        <span id="trades-summary" class="muted"></span>
+      </div>
+      <article class="card">
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">Closed (UTC)</th><th scope="col">Side</th><th scope="col" class="num">Size</th>
+                <th scope="col" class="num">Entry</th><th scope="col" class="num">Exit</th><th scope="col" class="num">Hold</th>
+                <th scope="col" class="num">Gross</th><th scope="col" class="num">Fees</th><th scope="col" class="num">Net</th>
+                <th scope="col">Exit reason</th>
+              </tr>
+            </thead>
+            <tbody id="trades"></tbody>
+          </table>
+        </div>
+        <div id="trades-empty" class="empty" hidden><div class="muted">No completed trades for this day.</div></div>
+      </article>
+      <article class="card">
+        <h2 class="card-title">Daily totals</h2>
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">Day (UTC)</th><th scope="col" class="num">Trades</th><th scope="col" class="num">Wins</th>
+                <th scope="col" class="num">Losses</th><th scope="col" class="num">Win rate</th><th scope="col" class="num">Fees</th>
+                <th scope="col" class="num">Net</th><th scope="col" class="num">Best</th><th scope="col" class="num">Worst</th>
+                <th scope="col" class="num">Avg hold</th>
+              </tr>
+            </thead>
+            <tbody id="daily"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <!-- ============================== Settings ============================== -->
+    <section id="tab-settings" role="tabpanel" hidden>
+      <article class="card" id="settings-check"></article>
+      <form id="settings-form" autocomplete="off"></form>
+      <div class="savebar">
+        <span id="settings-note" class="muted">Changes take effect the next time the bot starts.</span>
+        <span class="tabs-spacer"></span>
+        <button id="settings-reset" class="btn" type="button" disabled>Discard changes</button>
+        <button id="settings-save" class="btn btn-primary" type="button" disabled>Save</button>
+      </div>
+      <article class="card">
+        <h2 class="card-title">Panel password</h2>
+        <form id="password-form" class="row-form" autocomplete="off">
+          <label class="field"><span>Current password</span><input id="pw-current" type="password" autocomplete="current-password" required></label>
+          <label class="field"><span>New password</span><input id="pw-new" type="password" autocomplete="new-password" required></label>
+          <button class="btn" type="submit">Change password</button>
+        </form>
+      </article>
+    </section>
+
+    <!-- ================================ Logs ================================ -->
+    <section id="tab-logs" role="tabpanel" hidden>
+      <div class="filters">
+        <label class="check"><input id="logs-auto" type="checkbox" checked><span>Follow</span></label>
+        <label class="check"><input id="logs-warn" type="checkbox"><span>Warnings and errors only</span></label>
+        <label class="inline-field">
+          <span>Lines</span>
+          <select id="logs-lines"><option>200</option><option selected>500</option><option>1500</option></select>
+        </label>
+        <span id="logs-count" class="muted"></span>
+      </div>
+      <article class="card card-flush">
+        <div id="logs" class="logs" tabindex="0" aria-label="Bot log"></div>
+      </article>
+    </section>
+
+  </main>
+</div>
+
+<dialog id="confirm" class="dialog">
+  <form method="dialog">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-body"></p>
+    <ul id="confirm-list" class="dialog-list" hidden></ul>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" type="submit" id="confirm-cancel">Cancel</button>
+      <button class="btn btn-primary" value="ok" type="submit" id="confirm-ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

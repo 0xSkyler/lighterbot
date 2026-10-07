@@ -99,6 +99,7 @@ class HealthMonitor:
         self._last_status_log = 0.0
         self._last_meta_refresh = time.monotonic()
         self._background: set[asyncio.Task[None]] = set()
+        self._started_at = utc_iso()
         self._ping_running = False
 
     async def run(self) -> None:
@@ -248,8 +249,21 @@ class HealthMonitor:
             "mode": "MAINNET",
             "version": __version__,
             "pid": os.getpid(),
+            "started_at": self._started_at,
             "market": f"{self._meta.symbol} perpetual",
             "leverage": self._cfg.leverage,
+            "control": {"paused": "PAUSED" in trader.blocks, "last_command": trader.last_command},
+            "limits": {
+                "notional_usd": float(self._cfg.notional_usd),
+                "max_hold_ms": self._cfg.max_hold_ms,
+                "min_profit_usd": float(self._cfg.min_profit_usd),
+                "max_loss_usd": float(self._cfg.max_loss_usd),
+                "max_adverse_move_bps": self._cfg.max_adverse_move_mbps / 1000,
+                "entry_score_threshold": self._cfg.entry_score_threshold,
+                "max_spread_bps": self._cfg.max_spread_mbps / 1000,
+                "stale_ms": self._cfg.market_data_stale_ms,
+                "max_entries_per_minute": self._cfg.max_entries_per_minute,
+            },
             "leverage_confirmed": self._reconciler.leverage_confirmed,
             "market_ws": "connected" if self._market.connected else "disconnected",
             "account_ws": "connected" if self._account.synced else "disconnected",

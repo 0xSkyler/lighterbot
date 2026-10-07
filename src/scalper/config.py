@@ -349,5 +349,5 @@ def load_config(env: Mapping[str, str] | None = None, env_file: Path | None = No
         trade_csv=r.boolean("TRADE_CSV", True),
     )
     if r.errors:
-        raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(r.errors))
+        raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(r.errors), r.errors)
     return config

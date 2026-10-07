@@ -134,6 +134,7 @@ class Trader:
         self.last_signal: Signal = NO_SIGNAL
         self.shutting_down = False
         self.fatal_reason: str | None = None  # set when the process must exit and stay down
+        self.last_command: dict[str, str] | None = None  # last operator command (control panel)
 
         self._exit_reason = ""
         self._exit_emergency = False

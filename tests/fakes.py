@@ -136,6 +136,9 @@ class FakeRecovery:
     def request_resync(self, reason: str) -> None:
         self.resyncs.append(reason)
 
+    def manual_flatten(self) -> None:
+        self.recoveries.append("MANUAL_FLATTEN")
+
 
 class FakeClient:
     """A tiny exchange simulator behind the ``LighterClient`` interface used by the executor."""

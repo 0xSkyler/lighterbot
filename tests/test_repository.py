@@ -11,7 +11,7 @@ from scalper.config import load_config, parse_env_file
 from scalper.errors import ConfigError
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCES = sorted((ROOT / "src" / "scalper").glob("*.py"))
+SOURCES = sorted((ROOT / "src" / "scalper").rglob("*.py"))
 
 
 def test_env_example_refuses_to_start_as_shipped() -> None:
@@ -80,6 +80,9 @@ def test_deployment_files_exist() -> None:
         "deploy/install.sh",
         "deploy/update.sh",
         "deploy/lighter-scalper.service",
+        "deploy/lighter-scalper-ui.service",
+        "deploy/50-lighter-scalper.rules",
+        "deploy/lighter-scalper-ui.desktop",
         "README.md",
         "LICENSE",
         "pyproject.toml",
@@ -90,3 +93,29 @@ def test_deployment_files_exist() -> None:
     unit = (ROOT / "deploy" / "lighter-scalper.service").read_text(encoding="utf-8")
     assert "Restart=always" in unit and "RestartPreventExitStatus=78" in unit
     assert "After=network-online.target" in unit and "EnvironmentFile=" in unit
+
+
+def test_control_panel_unit_is_loopback_only_and_unprivileged() -> None:
+    unit = (ROOT / "deploy" / "lighter-scalper-ui.service").read_text(encoding="utf-8")
+    assert "Environment=UI_HOST=127.0.0.1" in unit and "UI_ALLOW_REMOTE" not in unit
+    assert "User=scalper" in unit and "NoNewPrivileges=true" in unit and "CapabilityBoundingSet=\n" in unit
+    assert "ExecStart=/opt/lighter-scalper/.venv/bin/lighter-scalper ui" in unit
+
+
+def test_polkit_rule_grants_only_the_trading_unit() -> None:
+    rule = (ROOT / "deploy" / "50-lighter-scalper.rules").read_text(encoding="utf-8")
+    assert rule.count("polkit.addRule") == 1
+    assert 'action.lookup("unit") == "lighter-scalper.service"' in rule and 'subject.user == "scalper"' in rule
+    assert 'action.id == "org.freedesktop.systemd1.manage-units"' in rule
+    for verb in ("start", "stop", "restart"):
+        assert f'verb == "{verb}"' in rule
+    assert "enable" not in rule and "polkit.Result.YES" in rule and rule.count("polkit.Result.YES") == 1
+
+
+def test_install_script_keeps_the_environment_file_private() -> None:
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    assert 'chmod 0660 "${ENV_FILE}"' in script and 'chgrp "${APP_USER}" "${ENV_FILE}"' in script
+    assert 'install -d -m 0770 -o root -g "${APP_USER}" "${ENV_DIR}"' in script
+    assert 'systemctl start "${UNIT}"' not in script  # installing never starts live trading
+    update = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+    assert 'systemctl is-active --quiet "${UNIT}"' in update  # an update never starts a stopped bot
